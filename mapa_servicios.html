@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Mapas de Servicios — Conecta Mobility</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root {
+    --morado: #5f2167;
+    --naranja: #ff5100;
+    --negro: #111;
+  }
+  html, body { margin:0; padding:0; height:100%; font-family: -apple-system, "Segoe UI", Arial, sans-serif; }
+  #mapa { position:absolute; top:0; bottom:0; left:0; right:0; }
+  #panel {
+    position:absolute; top:16px; left:16px; z-index:1000;
+    background:#fff; border-radius:10px; padding:14px 16px;
+    box-shadow:0 2px 12px rgba(0,0,0,0.25); min-width:280px;
+  }
+  #panel h1 { font-size:14px; margin:0 0 10px 0; color:var(--morado); }
+  #panel select {
+    width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;
+    font-size:13px; margin-bottom:6px;
+  }
+  #info { font-size:12px; color:#555; margin-top:6px; line-height:1.5; }
+  .leaflet-popup-content { font-size:12.5px; line-height:1.5; }
+  .popup-titulo { font-weight:700; color:var(--morado); margin-bottom:4px; }
+  .popup-link {
+    display:inline-block; margin-top:6px; padding:4px 10px;
+    background:var(--naranja); color:#fff; text-decoration:none;
+    border-radius:5px; font-size:11.5px; font-weight:600;
+  }
+  .popup-link:hover { opacity:0.85; }
+  .etiqueta-permanente {
+  background: #fff;
+  border: 1.5px solid var(--naranja);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #111;
+  line-height: 1.35;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+  white-space: nowrap;
+  }
+  .etiqueta-permanente::before { display: none; }
+</style>
+</head>
+<body>
+
+<div id="mapa"></div>
+<div id="panel">
+  <h1>🗺️ Mapas de Servicios — Ciclo 1</h1>
+  <select id="selectorServicio"></select>
+  <div id="info">Cargando datos...</div>
+</div>
+<script>
+const RUTA_JSON = "mapas_servicios.json";
+const MORADO = "#5f2167";
+const NARANJA = "#ff5100";
+
+const mapa = L.map('mapa').setView([-33.45, -70.65], 12);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors',
+  maxZoom: 19,
+}).addTo(mapa);
+
+let capaLinea = null;
+let capaPuntos = null;
+let datosGlobales = null;
+
+function streetViewUrl(lat, lon) {
+  return `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${lat},${lon}`;
+}
+
+const cacheDirecciones = {};
+
+async function obtenerCruceCercano(lat, lon) {
+  const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
+  if (cacheDirecciones[key]) return cacheDirecciones[key];
+
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=17&addressdetails=1`;
+    const resp = await fetch(url, { headers: { "Accept-Language": "es" } });
+    const data = await resp.json();
+    const addr = data.address || {};
+    const calle = addr.road || addr.pedestrian || addr.footway || null;
+    const numero = addr.house_number || null;
+    let texto;
+    if (calle && numero) texto = `${calle} ${numero}`;
+    else if (calle) texto = calle;
+    else texto = "dirección no disponible";
+    cacheDirecciones[key] = texto;
+    return texto;
+  } catch (e) {
+    return "dirección no disponible";
+  }
+}
+
+function dibujarServicio(servicioObj) {
+  if (capaLinea) mapa.removeLayer(capaLinea);
+  if (capaPuntos) mapa.removeLayer(capaPuntos);
+
+  capaLinea = L.geoJSON(servicioObj.linea, {
+    style: { color: MORADO, weight: 4, opacity: 0.9, lineCap: "round" }
+  }).addTo(mapa);
+
+  let contadorPunto = 0;
+  capaPuntos = L.geoJSON(servicioObj.puntos, {
+    pointToLayer: (feature, latlng) => L.circleMarker(latlng, {
+      radius: 7, fillColor: MORADO, color: "#fff", weight: 2,
+      opacity: 1, fillOpacity: 1,
+    }),
+    onEachFeature: (feature, layer) => { const idx = contadorPunto++;
+      const p = feature.properties;
+      const lat = feature.geometry.coordinates[1];
+      const lon = feature.geometry.coordinates[0];
+      const nombre = p.nombre_paradero || "(sin nombre)";
+      const codigo = p.codigo_paradero || "";
+      const correlativo = p.correlativo_anexo !== undefined ? p.correlativo_anexo : "";
+
+      // --- etiqueta siempre visible (como las viñetas del mapa estático) ---
+      layer.bindTooltip(
+        `<b>${correlativo}</b> · ${codigo}<br>${nombre}`,
+        {
+          permanent: true,
+          direction: (idx % 2 === 0) ? "right" : "left",
+          offset: (idx % 2 === 0) ? [10, 0] : [-10, 0],
+          className: "etiqueta-permanente",
+        }
+      );
+
+      // --- popup al clic: dirección + street view ---
+      layer.bindPopup(`
+        <div class="popup-titulo">Paradero ${correlativo}</div>
+        <div><b>${codigo}</b> / ${nombre}</div>
+        <div id="dir-${codigo}-${correlativo}" style="color:#777; font-size:11.5px; margin-top:4px;">
+          📍 Buscando dirección más cercana...
+        </div>
+        <a class="popup-link" href="${streetViewUrl(lat, lon)}" target="_blank" rel="noopener">
+          📷 Ver en Street View
+        </a>
+      `);
+
+      layer.on("popupopen", async () => {
+        const div = document.getElementById(`dir-${codigo}-${correlativo}`);
+        if (div && !div.dataset.cargado) {
+          const cruce = await obtenerCruceCercano(lat, lon);
+          div.innerHTML = `📍 Cerca de: ${cruce}`;
+          div.dataset.cargado = "1";
+        }
+      });
+    }
+  }).addTo(mapa);
+
+  const grupo = L.featureGroup([capaLinea, capaPuntos]);
+  mapa.fitBounds(grupo.getBounds(), { padding: [40, 40] });
+
+  document.getElementById("info").innerHTML =
+    `Servicio <b>${servicioObj.codigo}</b> · ${servicioObj.sentido}<br>` +
+    `${servicioObj.puntos.features.length} paraderos`;
+}
+
+fetch(RUTA_JSON)
+  .then(r => {
+    if (!r.ok) throw new Error("no se pudo leer " + RUTA_JSON);
+    return r.json();
+  })
+  .then(data => {
+    datosGlobales = data;
+    const selector = document.getElementById("selectorServicio");
+    data.servicios.forEach((s, i) => {
+      const opt = document.createElement("option");
+      opt.value = i;
+      opt.textContent = `${s.codigo} · ${s.sentido}`;
+      selector.appendChild(opt);
+    });
+    selector.addEventListener("change", () => {
+      dibujarServicio(datosGlobales.servicios[selector.value]);
+    });
+    if (data.servicios.length > 0) dibujarServicio(data.servicios[0]);
+  })
+  .catch(err => {
+    document.getElementById("info").innerHTML =
+      `⚠️ Error cargando ${RUTA_JSON}: ${err.message}<br>` +
+      `Asegúrate de que el archivo esté en la misma carpeta y que estés abriendo esto desde un servidor local, no doble-clic directo.`;
+    console.error(err);
+  });
+</script>
+
+</body>
+</html>
